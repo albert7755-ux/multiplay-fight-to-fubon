@@ -155,6 +155,16 @@ table.lbt tr.me td{background:rgba(47,211,191,.16);color:var(--fg);font-weight:7
 .btn[disabled]{opacity:.5;cursor:default}
 .divider{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:12px;margin:10px 0}
 .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
+.rlist{list-style:none;margin:0 0 14px;padding:0;display:grid;gap:6px;max-height:208px;overflow-y:auto}
+.rlist li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:8px 8px 8px 12px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid var(--line)}
+.rlist .rn{font-weight:700;font-size:15px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rlist .rm{display:block;font-size:12px;color:var(--dim);font-weight:400;margin-top:1px}
+.rlist .rm b{color:var(--teal);font-weight:700}
+.rlist .rm b.busy{color:var(--gold)}
+.rlist button{font:700 13px var(--f-ui);border-radius:8px;padding:8px 14px;cursor:pointer;border:0;background:var(--teal);color:#062520;white-space:nowrap}
+.rlist button[disabled]{background:rgba(255,255,255,.1);color:var(--dim);cursor:default}
+.rlist button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+.rlist .rempty{display:block;color:var(--dim);font-size:13px;background:none;border-style:dashed;padding:12px;text-align:center}
 .linkbtn{margin-top:12px;font:700 13px var(--f-ui);color:var(--gold);background:none;border:1px dashed rgba(255,201,60,.5);border-radius:8px;padding:9px 12px;cursor:pointer;width:100%}
 .linkbtn:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 .plist{list-style:none;margin:0 0 12px;padding:0;display:grid;gap:6px}
@@ -283,11 +293,13 @@ table.lbt tr.me td{background:rgba(47,211,191,.16);color:var(--fg);font-weight:7
       <button class="btn wide" id="btnSolo" type="button">單機練習</button>
     </div>
     <div class="divider">或是跟同事一起飛</div>
+    <h3 class="sec">目前開放的房間 <span class="cap" id="orCap"></span></h3>
+    <ul class="rlist" id="openRooms"><li class="rempty">讀取中…</li></ul>
     <div class="field">
-      <label for="roomCode">多人對戰 · 房間代碼（同房最多 10 人）</label>
+      <label for="roomCode">開新房間 · 自己取一個房間代碼（同房最多 10 人）</label>
       <div class="row2">
         <input id="roomCode" type="text" maxlength="12" autocomplete="off" placeholder="例如：西湖A">
-        <button class="btn teal" id="btnJoin" type="button">進入房間</button>
+        <button class="btn teal" id="btnJoin" type="button">開房間</button>
       </div>
     </div>
     <p class="note err" id="startMsg" hidden></p>
@@ -791,13 +803,20 @@ function rpc(fn,args){
 }
 
 /* ---------------- 排行榜 ---------------- */
-function submitScore(name,score,flight,rings){
-  const body={board:BOARD_ID,name:name,score:score,flight:flight,rings:rings,mode:MODE};
-  if(MODE==='multi')body.room=M.room;
+function submitScore(name,score,flight,rings,plain){
+  const body={board:BOARD_ID,name:name,score:score,flight:flight,rings:rings};
+  if(!plain){body.mode=MODE;if(MODE==='multi')body.room=M.room;}
   fetch(SB_URL+'/rest/v1/flight_scores',{method:'POST',headers:sbHeaders({'Content-Type':'application/json',Prefer:'return=minimal'}),body:JSON.stringify(body)})
   .then(res=>{if(!res.ok)return res.text().then(t=>{throw sbError(res.status,t);});
     $('winNote').className='note ok';$('winNote').textContent='成績已上排行榜 ✓';loadBoard(true);})
-  .catch(e=>{$('winNote').className='note err';$('winNote').textContent='成績沒送出去：'+(e&&e.message?e.message:'連不上資料庫');if(e&&e.detail)console.error('Supabase:',e.detail);});
+  .catch(e=>{
+    // 資料庫還不認得新欄位（mode / room）時，改用舊格式再送一次，確保成績上得去
+    const d=(e&&e.detail)||'';
+    if(!plain&&/PGRST204|mode|room|column/i.test(d)){submitScore(name,score,flight,rings,true);return;}
+    $('winNote').className='note err';
+    $('winNote').textContent='成績沒送出去：'+(e&&e.message?e.message:'連不上資料庫')+(d?'（資料庫回覆：'+d.slice(0,140)+'）':'');
+    if(d)console.error('Supabase:',d);
+  });
 }
 function setStatus(t){[1,2,3].forEach(n=>{$('lbStatus'+n).textContent=t;});}
 function loadBoard(showRank){
@@ -832,13 +851,15 @@ loadBoard(false);
 setInterval(()=>{if(!S.running)loadBoard(!$('endOv').hidden);},10000);
 
 /* ---------------- 多人：進房 / 離房 ---------------- */
-function joinRoom(){
+function joinRoom(code){
+  if(typeof code==='string'&&code)$('roomCode').value=code;
   const name=cleanName(),room=cleanRoom();
   if(!name){startMsg('多人對戰要先填名字，排名才認得出你。');$('myName').focus();return;}
-  if(!room){startMsg('請輸入房間代碼，同組的人輸入同一個代碼就會在同一房。');$('roomCode').focus();return;}
+  if(!room){startMsg('請從上面挑一個房間加入，或自己取一個房間代碼開新房間。');$('roomCode').focus();return;}
   if(!SB_ON){startMsg('多人對戰需要先接上資料庫（Supabase），請參考 README。');return;}
   LB.myName=name;lsSet(LS_NAME,name);lsSet(LS_ROOM,room);
   const btn=$('btnJoin');btn.disabled=true;btn.textContent='連線中…';startMsg('');
+  document.querySelectorAll('#openRooms button').forEach(b=>{b.disabled=true;});
   rpc('flight_join',{p_room:room,p_pid:M.pid,p_name:name}).then(d=>{
     if(!d||!d.ok){
       const r=d&&d.reason;
@@ -853,14 +874,14 @@ function joinRoom(){
     colorMap.clear();M.msg='';
     resetGame();showLobby();
     onRoomData(d);poll();
-  }).catch(e=>startMsg('進不了房間：'+(e&&e.message?e.message:'連不上資料庫'))).finally(()=>{btn.disabled=false;btn.textContent='進入房間';});
+  }).catch(e=>startMsg('進不了房間：'+(e&&e.message?e.message:'連不上資料庫'))).finally(()=>{btn.disabled=false;setJoinLabel();refreshOpenRooms();});
 }
 function leaveRoom(silent){
   M.inRoom=false;clearTimeout(M.timer);M.countdown=false;
   $('cd').hidden=true;$('roomPanel').hidden=true;$('mission').hidden=false;$('lobbyOv').hidden=true;
   ghosts.forEach(g=>scene.remove(g.group));ghosts.clear();
   M.players=[];MODE='solo';
-  if(!silent){S.running=false;S.done=false;resetGame();$('endOv').hidden=true;$('startOv').hidden=false;}
+  if(!silent){S.running=false;S.done=false;resetGame();$('endOv').hidden=true;$('startOv').hidden=false;refreshOpenRooms();}
 }
 function showLobby(){
   $('endOv').hidden=true;$('startOv').hidden=true;
@@ -868,7 +889,60 @@ function showLobby(){
   $('roomPanel').hidden=true;$('mission').hidden=false;
   renderRoom();
 }
-$('btnJoin').addEventListener('click',joinRoom);
+$('btnJoin').addEventListener('click',()=>joinRoom());
+
+/* ---------------- 開始畫面：目前開放的房間 ---------------- */
+let openRooms=[];
+function setJoinLabel(){
+  const code=cleanRoom();
+  $('btnJoin').textContent=code&&openRooms.some(r=>r.room===code)?'加入房間':'開房間';
+}
+function refreshOpenRooms(){
+  if($('startOv').hidden)return;
+  const ul=$('openRooms');
+  if(!SB_ON){ul.innerHTML='';const li=document.createElement('li');li.className='rempty';li.textContent='多人對戰需要先接上資料庫（Supabase）。';ul.appendChild(li);return;}
+  rpc('flight_board',{}).then(d=>{
+    const players=(d&&d.players)||[],now=d&&d.now_ms;
+    openRooms=((d&&d.rooms)||[]).map(r=>{
+      const ps=players.filter(p=>p.room===r.room);
+      const flying=ps.some(p=>p.round===r.round&&p.state==='flying');
+      const counting=r.start_ms&&now<r.start_ms;
+      return {room:r.room,n:ps.length,host:ps[0]?ps[0].name:'',flying,counting,round:r.round};
+    }).sort((a,b)=>(a.flying-b.flying)||(b.n-a.n)||a.room.localeCompare(b.room));
+    // 內容沒變就不重畫，避免按到一半按鈕被換掉
+    const sig=JSON.stringify(openRooms);
+    if(sig===refreshOpenRooms.sig&&ul.children.length){setJoinLabel();return;}
+    refreshOpenRooms.sig=sig;
+    ul.innerHTML='';
+    $('orCap').textContent=openRooms.length?openRooms.length+' 間':'';
+    if(!openRooms.length){
+      const li=document.createElement('li');li.className='rempty';
+      li.textContent='目前沒有人開房間。在下面取一個房間代碼，你就是第一個房長。';ul.appendChild(li);
+    }
+    openRooms.forEach(r=>{
+      const li=document.createElement('li');
+      const info=document.createElement('div');info.className='rn';info.textContent=r.room;
+      const meta=document.createElement('span');meta.className='rm';
+      const st=document.createElement('b');
+      st.textContent=r.counting?'倒數中':r.flying?'比賽中':'等人中';if(r.counting||r.flying)st.className='busy';
+      meta.append(st,document.createTextNode(' · '+r.n+'/'+ROOM_MAX+' 人'+(r.host?' · 房長 '+r.host:'')));
+      info.appendChild(meta);
+      const b=document.createElement('button');b.type='button';
+      const full=r.n>=ROOM_MAX;
+      b.textContent=full?'已滿':'加入';b.disabled=full;
+      b.setAttribute('aria-label',(full?'已滿：':'加入房間 ')+r.room);
+      b.addEventListener('click',()=>joinRoom(r.room));
+      li.append(info,b);ul.appendChild(li);
+    });
+    setJoinLabel();
+  }).catch(e=>{
+    refreshOpenRooms.sig='';ul.innerHTML='';const li=document.createElement('li');li.className='rempty';
+    li.textContent='房間清單讀取失敗：'+(e&&e.message?e.message:'連不上資料庫');ul.appendChild(li);
+  });
+}
+$('roomCode').addEventListener('input',setJoinLabel);
+refreshOpenRooms();
+setInterval(refreshOpenRooms,3000);
 $('btnSolo').addEventListener('click',startSolo);
 $('btnLeave').addEventListener('click',()=>leaveRoom(false));
 $('btnGo').addEventListener('click',()=>{
@@ -893,7 +967,7 @@ $('btnAgain').addEventListener('click',()=>{
 function poll(force){
   if(!M.inRoom)return;
   if(M.polling){if(!force)schedule();return;}
-  M.polling=true;clearTimeout(M.timer);
+  M.polling=true;clearTimeout(M.timer);M.pollStart=Date.now();
   const r1=v=>Math.round(v*10)/10;
   const a={p_room:M.room,p_pid:M.pid,p_round:M.myRound,p_state:M.state,
            p_x:r1(S.pos.x),p_y:r1(S.pos.y),p_z:r1(S.pos.z),p_yaw:Math.round(S.yaw*1000)/1000,p_pitch:Math.round(S.pitch*1000)/1000,
@@ -903,7 +977,7 @@ function poll(force){
   .catch(e=>{setLobbyMsg('連線不穩：'+(e&&e.message?e.message:'連不上資料庫')+'（會自動重試）');})
   .finally(()=>{M.polling=false;schedule();});
 }
-function schedule(){clearTimeout(M.timer);if(M.inRoom)M.timer=setTimeout(poll,1000);}
+function schedule(){clearTimeout(M.timer);if(M.inRoom)M.timer=setTimeout(poll,Math.max(150,1000-(Date.now()-(M.pollStart||0))));}
 
 function onRoomData(d){
   if(!d||!M.inRoom&&MODE!=='multi')return;
@@ -1013,7 +1087,7 @@ function makeLabel(text,color){
   s.scale.set(0.16,0.04,1);return s;
 }
 function makePlane(color){
-  const g=new THREE.Group();g.rotation.order='YXZ';
+  const g=new THREE.Group();g.rotation.order='YXZ';g.scale.setScalar(1.5);
   const m=new THREE.MeshLambertMaterial({color});
   const w=new THREE.MeshLambertMaterial({color:0xf2f5f6});
   const body=new THREE.Mesh(new THREE.CylinderGeometry(0.5,0.32,5,10),m);body.rotation.x=Math.PI/2;g.add(body);
@@ -1036,25 +1110,47 @@ function ghostSample(p){
   if(g.round!==p.round){g.round=p.round;g.samples=[];}
   g.flying=(p.state==='flying'&&p.round===M.myRound);
   const last=g.samples[g.samples.length-1];
-  if(!last||p.ts>last.t){g.samples.push({t:p.ts,x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch});if(g.samples.length>8)g.samples.shift();}
+  if(!last||p.ts>last.t){g.samples.push({t:p.ts,x:p.x,y:p.y,z:p.z,yaw:p.yaw,pitch:p.pitch,idx:p.progress/1000*LAST});if(g.samples.length>8)g.samples.shift();}
 }
 function angLerp(a,b,t){let d=b-a;while(d>Math.PI)d-=Math.PI*2;while(d<-Math.PI)d+=Math.PI*2;return a+d*t;}
+const ghostTmp=new V3();let ghostLast=performance.now();
+const SEG=L/SAMPLES; // 黃線上相鄰兩點的距離（公尺）
 function updateGhosts(){
+  const nowPerf=performance.now(),fdt=Math.min(0.25,(nowPerf-ghostLast)/1000);ghostLast=nowPerf;
   if(!ghosts.size)return;
-  const rt=serverNow()-1150; // 顯示約 1 秒前的位置，前後兩點補間，看起來就是連續飛行
+  // 推算對手「現在」的位置：大家都沿著黃線飛，所以沿著黃線往前推（彎道也準），
+  // 再加上他當時偏離黃線的距離；偏太遠的才改用機頭方向直線推算
+  const now=serverNow();
+  const k=1-Math.exp(-fdt*6);
   ghosts.forEach(g=>{
     const s=g.samples;
-    if(!g.flying||!s.length||!(S.running||M.countdown||S.done)){g.group.visible=false;return;}
-    let x,y,z,yaw,pitch;
-    if(rt<=s[0].t||s.length===1){({x,y,z,yaw,pitch}=s[0]);}
-    else{
-      let i=s.length-2;for(let k=0;k<s.length-1;k++){if(rt>=s[k].t&&rt<=s[k+1].t){i=k;break;}}
-      const a=s[i],b=s[i+1];let t=(rt-a.t)/Math.max(1,b.t-a.t);
-      t=Math.min(t,1+Math.min(1.5,(rt-b.t)/1000)); // 資料晚到時，最多往前推 1.5 秒
-      x=a.x+(b.x-a.x)*t;y=a.y+(b.y-a.y)*t;z=a.z+(b.z-a.z)*t;yaw=angLerp(a.yaw,b.yaw,Math.min(t,1));pitch=a.pitch+(b.pitch-a.pitch)*Math.min(t,1);
+    if(!g.flying||!s.length||!(S.running||M.countdown||S.done)){g.group.visible=false;g.init=false;return;}
+    const b=s[s.length-1],a=s.length>1?s[s.length-2]:null;
+    const ahead=Math.min(3,Math.max(0,(now-b.t)/1000));
+    const bi=Math.max(0,Math.min(LAST,Math.round(b.idx)));
+    const base=pathPts[bi];
+    const devX=b.x-base.x,devY=b.y-base.y,devZ=b.z-base.z;
+    const onPath=Math.hypot(devX,devY,devZ)<25;
+    let speed=15;
+    if(a&&b.t>a.t){
+      const span=(b.t-a.t)/1000;
+      speed=onPath&&b.idx>a.idx?(b.idx-a.idx)*SEG/span:Math.hypot(b.x-a.x,b.y-a.y,b.z-a.z)/span;
+      speed=Math.max(4,Math.min(40,speed));
     }
-    g.group.position.set(x,y,z);g.plane.rotation.set(pitch,yaw,0);
-    g.group.visible=g.group.position.distanceTo(camera.position)>6;
+    let yaw=b.yaw,pitch=b.pitch;
+    if(onPath){
+      const ti=Math.min(LAST,bi+Math.round(speed*ahead/SEG));
+      const q=pathPts[ti],q2=pathPts[Math.min(LAST,ti+3)];
+      ghostTmp.set(q.x+devX,q.y+devY,q.z+devZ);
+      if(ti>bi&&q2!==q){const dx=q2.x-q.x,dy=q2.y-q.y,dz=q2.z-q.z,m=Math.hypot(dx,dy,dz)||1;yaw=Math.atan2(-dx,-dz);pitch=Math.asin(dy/m);}
+    }else{
+      const cp=Math.cos(b.pitch);
+      ghostTmp.set(b.x-Math.sin(b.yaw)*cp*speed*ahead,b.y+Math.sin(b.pitch)*speed*ahead,b.z-Math.cos(b.yaw)*cp*speed*ahead);
+    }
+    if(!g.init||g.group.position.distanceTo(ghostTmp)>45){g.group.position.copy(ghostTmp);g.yaw=yaw;g.pitch=pitch;g.init=true;}
+    else{g.group.position.lerp(ghostTmp,k);g.yaw=angLerp(g.yaw,yaw,k);g.pitch+=(pitch-g.pitch)*k;}
+    g.plane.rotation.set(g.pitch,g.yaw,0);
+    g.group.visible=g.group.position.distanceTo(camera.position)>5;
   });
 }
 
@@ -1066,7 +1162,7 @@ function openBoard(){
   refreshBoard();loadBoard(false);
   clearInterval(boardTimer);boardTimer=setInterval(()=>{refreshBoard();},2000);
 }
-function closeBoard(){$('boardOv').hidden=true;clearInterval(boardTimer);$('startOv').hidden=false;}
+function closeBoard(){$('boardOv').hidden=true;clearInterval(boardTimer);$('startOv').hidden=false;refreshOpenRooms();}
 let boardTick=0;
 function refreshBoard(){
   boardTick++;if(boardTick%3===0)loadBoard(false);
